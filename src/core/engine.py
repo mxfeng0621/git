@@ -3,16 +3,19 @@
 from dataclasses import dataclass, field
 from typing import Callable
 
+import random
+
 from core.party import Party
 from core.character import Character
 from core.inventory import Inventory
 from core.combat import Combat, MonsterState, CombatEvent
 from core.auto_rules import AutoRuleEngine
 from core.quest import QuestManager, QuestDef, QuestStatus
-from core.dialogue import DialogueManager
+from core.dialogue import DialogueManager, DialogueNode
 from data.monsters import MonsterTemplate, MONSTERS
 from utils.constants import StrategyType, CombatResult, MessageCategory
 from services.command_parser import Command, CommandParser, ActionCategory
+from world.world_map import WorldMap
 
 
 @dataclass
@@ -30,11 +33,13 @@ class GameEngine:
     quest_manager: QuestManager = field(default_factory=QuestManager)
     dialogue_manager: DialogueManager = field(default_factory=DialogueManager)
     auto_rules: AutoRuleEngine = field(default_factory=AutoRuleEngine)
+    world_map: WorldMap = field(default_factory=WorldMap)
     combat: Combat | None = None
     current_scene_id: str = "river_town"
     story_flags: dict[str, bool] = field(default_factory=dict)
     defeated_bosses: set[str] = field(default_factory=set)
     parser: CommandParser = field(default_factory=CommandParser)
+    _pending_dialogue: DialogueNode | None = None   # 当前对话节点
 
     # 回调 — UI层注册
     on_message: Callable[[str, MessageCategory], None] | None = None
@@ -68,8 +73,79 @@ class GameEngine:
 
     # ---- 移动 ----
     def _move(self, cmd: Command) -> ActionResult:
-        # 占位 — v0.3 scenes 实现后完善
-        return ActionResult(f"前往「{cmd.target}」— 场景系统待实现。")
+        if self.combat:
+            return ActionResult("战斗中无法移动！先结束战斗或逃跑。",
+                                MessageCategory.WARNING)
+
+        if cmd.action == "back":
+            # 返回上一场景 — 简化实现：返回河畔镇
+            if self.current_scene_id != "river_town":
+                return self._travel_to("river_town")
+            return ActionResult("你已经在家了。")
+
+        target = cmd.target
+        if not target:
+            # 列出可去方向
+            conns = self.world_map.get_connections(self.current_scene_id)
+            if not conns:
+                return ActionResult("这里没有路通往其他地方。")
+            lines = ["你可以前往："]
+            for direction, scene_id in conns.items():
+                name = self.world_map.get_name(scene_id)
+                lines.append(f"  · {direction} — {name}")
+            return ActionResult("\n".join(lines))
+
+        new_scene = self.world_map.move(self.current_scene_id, target)
+        if new_scene is None:
+            return ActionResult(f"无法从这里前往「{target}」。输入「前往」查看可去方向。",
+                                MessageCategory.WARNING)
+        return self._travel_to(new_scene)
+
+    def _travel_to(self, scene_id: str) -> ActionResult:
+        scene = self.world_map.get(scene_id)
+        if not scene:
+            return ActionResult("该地点不存在。", MessageCategory.WARNING)
+
+        old_scene = self.current_scene_id
+        self.current_scene_id = scene_id
+
+        # 场景进入事件
+        result_text = f"【{scene.name}】\n\n{scene.description}"
+        events = scene.events
+
+        if "on_enter" in events:
+            ev = events["on_enter"]
+            if ev["type"] == "combat":
+                result_text += "\n\n⚔ 遭遇敌人！"
+                self.start_combat(ev["enemy_ids"])
+
+        # 随机遇敌
+        if not self.combat and not scene.is_safe and scene.monster_spawns:
+            spawn = self.world_map.monster_spawn(scene_id)
+            if spawn:
+                result_text += "\n\n⚔ 你遭遇了敌人！"
+                self.start_combat(spawn)
+
+        # 通知UI
+        if self.on_scene_change:
+            self.on_scene_change(scene_id)
+        if self.on_message:
+            self.on_message(result_text, MessageCategory.INFO)
+
+        return ActionResult(result_text)
+
+    # ---- 战斗指令（更新） ----
+    def _combat_cmd(self, cmd: Command) -> ActionResult:
+        if cmd.action == "flee":
+            if self.combat:
+                self.combat.result = CombatResult.RETREATED
+                self.combat = None
+                return ActionResult("你成功逃离了战斗！")
+            return ActionResult("当前没有战斗。", MessageCategory.WARNING)
+        # 战斗中的策略/集火/使用道具由 _execute_combat 处理
+        if self.combat:
+            return self._execute_combat(cmd)
+        return ActionResult("当前没有战斗。", MessageCategory.WARNING)
 
     # ---- 战斗指令 ----
     def _combat_cmd(self, cmd: Command) -> ActionResult:
@@ -159,15 +235,189 @@ class GameEngine:
     # ---- 交互 ----
     def _interact(self, cmd: Command) -> ActionResult:
         if cmd.action == "explore":
-            return ActionResult("你仔细搜索了周围…没有发现特别的东西。\n[探索系统待场景数据完成后完善]")
+            return self._do_explore()
         if cmd.action == "talk":
-            return ActionResult(f"与「{cmd.target}」对话 — 对话系统待完善。")
+            return self._do_talk(cmd.target)
+        if cmd.action == "pickup":
+            return self._do_pickup(cmd.target)
         if cmd.action == "rest":
-            self.party.rest_all()
-            return ActionResult("队伍在篝火旁休息了一晚。HP/MP 已全部恢复。",
-                                MessageCategory.SYSTEM)
+            return self._do_rest()
+        if cmd.action == "custom":
+            # 可能是一个数字选择（对话选项）
+            return self._handle_custom(cmd.target)
         return ActionResult(f"「{cmd.raw}」— 暂未理解。输入「帮助」查看指令。",
                             MessageCategory.WARNING)
+
+    def _do_explore(self) -> ActionResult:
+        scene = self.world_map.get(self.current_scene_id)
+        if not scene:
+            return ActionResult("这里没什么可探索的。")
+
+        events = scene.events
+        if "on_search" in events:
+            ev = events["on_search"]
+            if ev.get("once") and self.story_flags.get(f"searched_{self.current_scene_id}"):
+                pass  # 已搜索过
+            else:
+                self.story_flags[f"searched_{self.current_scene_id}"] = True
+                if ev["type"] == "loot":
+                    lines = ["你仔细搜索了周围……"]
+                    for item in ev["items"]:
+                        from core.dice import try_chance
+                        if try_chance(item["chance"]):
+                            self.inventory.add(item["item_id"])
+                            from data.items import ITEMS
+                            name = ITEMS.get(item["item_id"]).name if item["item_id"] in ITEMS else item["item_id"]
+                            lines.append(f"✨ 发现了 {name}！")
+                    if len(lines) == 1:
+                        lines.append("没有找到特别的东西。")
+                    self.quest_manager.progress("explore", self.current_scene_id, 1)
+                    return ActionResult("\n".join(lines), MessageCategory.LOOT)
+
+        # 随机发现
+        import random
+        if random.random() < 0.2:
+            gold = random.randint(3, 15)
+            self.inventory.gold += gold
+            return ActionResult(f"你搜索了一番，找到了 {gold} 枚金币。",
+                                MessageCategory.LOOT)
+
+        self.quest_manager.progress("explore", self.current_scene_id, 1)
+        return ActionResult("你仔细搜索了周围……没有发现特别的东西。")
+
+    def _do_talk(self, target: str) -> ActionResult:
+        if not target:
+            return ActionResult("你想和谁对话？输入「对话 [名字]」。",
+                                MessageCategory.WARNING)
+
+        # 找NPC
+        scene = self.world_map.get(self.current_scene_id)
+        npc_id = None
+        npc_name = target
+
+        if scene:
+            for nid in scene.npcs:
+                from world.story import ALL_DIALOGUES
+                if nid in ALL_DIALOGUES:
+                    tree_name = ALL_DIALOGUES[nid].npc_name
+                    if target in tree_name or target in nid:
+                        npc_id = nid
+                        npc_name = tree_name
+                        break
+
+        if not npc_id:
+            return ActionResult(f"这里没有叫「{target}」的人。", MessageCategory.WARNING)
+
+        node = self.dialogue_manager.start(npc_id)
+        if not node:
+            return ActionResult(f"{npc_name} 现在没什么可说的。")
+
+        self._pending_dialogue = node
+        return self._render_dialogue(npc_id, node)
+
+    def _render_dialogue(self, npc_id: str, node: DialogueNode) -> ActionResult:
+        lines = [f"—— {node.speaker} ——", "", node.text]
+
+        # 处理节点进入效果
+        if node.on_enter:
+            self._apply_dialogue_effects(node.on_enter)
+
+        if node.options:
+            lines.append("")
+            for i, opt in enumerate(node.options, 1):
+                lines.append(f"  [{i}] {opt.text}")
+            lines.append("")
+            lines.append("输入选项编号回复。")
+        self._pending_dialogue = node
+        self._pending_npc_id = npc_id
+        return ActionResult("\n".join(lines))
+
+    def _handle_custom(self, text: str) -> ActionResult:
+        """处理对话选项编号"""
+        if not self._pending_dialogue:
+            return ActionResult(f"「{text}」— 输入「帮助」查看可用指令。",
+                                MessageCategory.WARNING)
+
+        if text.isdigit():
+            idx = int(text) - 1
+            npc_id = getattr(self, '_pending_npc_id', '')
+            next_node = self.dialogue_manager.choose(
+                npc_id, self._pending_dialogue, idx)
+
+            if next_node is None and idx >= len(self._pending_dialogue.options):
+                self._pending_dialogue = None
+                return ActionResult("对话结束。")
+
+            # 处理选项效果 (兼容 effects 和 on_enter 两种写法)
+            option = self._pending_dialogue.options[idx]
+            eff = getattr(option, 'effects', None) or getattr(option, 'on_enter', {})
+            self._apply_dialogue_effects(eff)
+
+            if next_node:
+                return self._render_dialogue(npc_id, next_node)
+            else:
+                self._pending_dialogue = None
+                return ActionResult("对话结束。")
+
+        # 可能是"离开"
+        if text in ("离开", "再见", "结束"):
+            self._pending_dialogue = None
+            return ActionResult("你结束了对话。")
+
+        return ActionResult("请输入选项编号，或输入「离开」结束对话。",
+                            MessageCategory.WARNING)
+
+    def _apply_dialogue_effects(self, effects: dict) -> None:
+        if "start_quest" in effects:
+            qid = effects["start_quest"]
+            self.quest_manager.start(qid)
+            from data.quests import ALL_QUESTS
+            qdef = next((q for q in ALL_QUESTS if q.quest_id == qid), None)
+            if qdef and self.on_message:
+                self.on_message(f"📋 新任务：{qdef.name}", MessageCategory.LOOT)
+
+        if "give_item" in effects:
+            self.inventory.add(effects["give_item"])
+            from data.items import ITEMS
+            name = ITEMS.get(effects["give_item"]).name if effects["give_item"] in ITEMS else effects["give_item"]
+            if self.on_message:
+                self.on_message(f"✨ 获得：{name}", MessageCategory.LOOT)
+
+        if "recruit" in effects:
+            from core.character import create_character
+            recruit_id = effects["recruit"]
+            RECRUITS = {
+                "merlin": ("梅林", "elf", "mage",
+                           {"str": 8, "dex": 12, "con": 13, "int": 15, "wis": 12, "cha": 13}),
+                "shade": ("影刃", "halfling", "rogue",
+                          {"str": 10, "dex": 15, "con": 12, "int": 10, "wis": 11, "cha": 14}),
+                "holy": ("圣光", "dwarf", "cleric",
+                         {"str": 12, "dex": 8, "con": 15, "int": 10, "wis": 14, "cha": 10}),
+            }
+            if recruit_id in RECRUITS:
+                name, race, cls, attrs = RECRUITS[recruit_id]
+                char = create_character(name, race, cls, attrs)
+                if not isinstance(char, str):
+                    self.party.recruit(char)
+                    if self.on_message:
+                        self.on_message(f"✨ {name} 加入了队伍！", MessageCategory.LOOT)
+
+    def _do_pickup(self, target: str) -> ActionResult:
+        from data.items import ITEMS
+        for item_id, tmpl in ITEMS.items():
+            if target in tmpl.name or target in item_id:
+                self.inventory.add(item_id)
+                return ActionResult(f"拾取了 {tmpl.name}。", MessageCategory.LOOT)
+        return ActionResult(f"这里没有「{target}」可以拾取。", MessageCategory.WARNING)
+
+    def _do_rest(self) -> ActionResult:
+        scene = self.world_map.get(self.current_scene_id)
+        if scene and not scene.is_safe:
+            return ActionResult("这里不安全，不能休息！找个安全的地方吧。",
+                                MessageCategory.WARNING)
+        self.party.rest_all()
+        return ActionResult("队伍在安全的地方休息了。HP/MP 已全部恢复。",
+                            MessageCategory.SYSTEM)
 
     # ---- 物品 ----
     def _item_cmd(self, cmd: Command) -> ActionResult:
@@ -199,9 +449,9 @@ class GameEngine:
         if cmd.action == "inventory":
             return ActionResult(self._build_inventory_text())
         if cmd.action == "quests":
-            return ActionResult("任务日志待实现。")
+            return self._show_quests()
         if cmd.action == "map":
-            return ActionResult("地图待实现。")
+            return self._show_map()
         return ActionResult("未知查询。")
 
     def _build_status_text(self) -> str:
@@ -233,6 +483,29 @@ class GameEngine:
                 lines.append(f"  {name} ×{item.quantity}")
         return "\n".join(lines)
 
+    def _show_quests(self) -> ActionResult:
+        from data.quests import ALL_QUESTS
+        active = self.quest_manager.active_quests()
+        if not active:
+            return ActionResult("当前没有进行中的任务。\n去镇长宅邸或酒馆看看吧。")
+
+        lines = ["══════ 任务日志 ══════"]
+        for qs in active:
+            qdef = next((q for q in ALL_QUESTS if q.quest_id == qs.quest_id), None)
+            name = qdef.name if qdef else qs.quest_id
+            lines.append(f"\n📋 {name}")
+            if qdef:
+                lines.append(f"   {qdef.description[:60]}…")
+            for obj in qs.objectives:
+                done = "✓" if obj.is_complete else "○"
+                lines.append(f"   {done} {obj.description} ({obj.current_count}/{obj.target_count})")
+
+        completed = [qid for qid in self.quest_manager.completed_ids]
+        if completed:
+            lines.append(f"\n已完成任务: {len(completed)} 个")
+
+        return ActionResult("\n".join(lines))
+
     # ---- 系统 ----
     def _system(self, cmd: Command) -> ActionResult:
         if cmd.action == "save":
@@ -263,21 +536,64 @@ class GameEngine:
         except Exception as e:
             return ActionResult(f"读档失败: {e}", MessageCategory.DANGER)
 
+    def _show_map(self) -> str:
+        scene = self.world_map.get(self.current_scene_id)
+        lines = [f"══════ 当前位置：{scene.name if scene else self.current_scene_id} ══════",
+                 ""]
+        if scene:
+            lines.append("🌲 世界地图（已知区域）：")
+            lines.append("")
+            lines.append("  龙脊山脉 [未探索]")
+            lines.append("      ↑")
+            lines.append("  黑石城堡 [未探索]")
+            lines.append("      ↑")
+            lines.append("  废弃矿洞 [未探索]")
+            lines.append("      ↑")
+            lines.append("  森林深处 ← 幽暗森林 → 精灵遗迹")
+            lines.append("      ↓           ↙")
+            lines.append("  河畔镇 ★←你在这里→ 王国大道 [未解锁]")
+            lines.append("")
+            lines.append("可前往的方向：")
+            for d, sid in scene.connections.items():
+                name = self.world_map.get_name(sid)
+                lines.append(f"  · {d} → {name}")
+        return ActionResult("\n".join(lines))
+
     def new_game(self) -> ActionResult:
         from core.character import create_character
+        from data.quests import ALL_QUESTS
+        from world.story import ALL_DIALOGUES
+
         self.party = Party()
         self.inventory = Inventory()
         self.combat = None
         self.story_flags = {}
         self.defeated_bosses = set()
         self.current_scene_id = "river_town"
+        self._pending_dialogue = None
+        self._pending_npc_id = ""
+
+        # 初始化任务
+        self.quest_manager = QuestManager()
+        self.quest_manager.init_from_defs(ALL_QUESTS)
+
+        # 初始化对话
+        self.dialogue_manager = DialogueManager()
+        for npc_id, tree in ALL_DIALOGUES.items():
+            self.dialogue_manager.register(tree)
+
         # 创建默认主角
         char = create_character("冒险者", "human", "warrior",
                                 {"str": 14, "dex": 12, "con": 13, "int": 10, "wis": 10, "cha": 12})
         if isinstance(char, str):
             return ActionResult(f"创建角色失败: {char}", MessageCategory.DANGER)
         self.party.add_member(char, 0)
-        return ActionResult("新的冒险开始了！输入「帮助」查看可用指令。\n"
+
+        # 初始场景文本
+        scene = self.world_map.get("river_town")
+        text = "新的冒险开始了！\n\n" + (scene.description if scene else "")
+
+        return ActionResult(text + "\n\n输入「帮助」查看可用指令。\n"
                             "提示：前往酒馆招募同伴组建4人小队。")
 
     # ---- 战斗生命周期 ----
@@ -341,11 +657,12 @@ class GameEngine:
 
 HELP_TEXT = """══════ 可用指令 ══════
 
-【移动】前往 [地点]  |  返回  |  地图
+【移动】前往 [地点/方向]  |  返回  |  地图
 【战斗】策略 [队员] [策略名]  |  集火 [目标]  |  逃跑
-【交互】探索  |  对话 [NPC]  |  检查 [物品]  |  休息
-【物品】背包  |  装备 [物品]  |  使用 [物品] [对象]  |  丢弃 [物品]
+【交互】探索  |  对话 [NPC名]  |  拾取 [物品]  |  休息
+【物品】背包  |  装备 [物品]  |  使用 [物品] [对象]
 【信息】状态  |  任务  |  帮助
 【系统】存档  |  读档
 
-战斗策略：全力猛攻 / 平衡输出 / 保留法力 / 优先治疗 / 防御牵制"""
+战斗策略：全力猛攻 / 平衡输出 / 保留法力 / 优先治疗 / 防御牵制
+探险提示：在酒馆招募同伴 → 去镇长宅邸接任务 → 出城向北进入森林"""

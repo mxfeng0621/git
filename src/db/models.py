@@ -12,6 +12,7 @@ class SaveSlot:
     avg_level: int = 1
     play_secs: int = 0
     scene_id: str = "river_town"
+    gold: int = 0
     created_at: str = ""
     updated_at: str = ""
 

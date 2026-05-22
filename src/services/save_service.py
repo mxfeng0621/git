@@ -11,6 +11,7 @@ from db.repository import (
 from db.models import (
     SaveSlot, PartyMemberRow, InventoryRow, GameProgressRow,
 )
+from db.database import get_connection
 from data.classes import CLASSES
 from data.races import RACES
 
@@ -52,6 +53,7 @@ def save_game(engine: "GameEngine", slot: int = 1,
                     slot_name=slot_name or f"存档 {slot}",
                     party_name="冒险小队",
                     avg_level=avg_lv,
+                    gold=inventory.gold,
                     scene_id=engine.current_scene_id)
 
     # 2) 队伍成员
@@ -179,10 +181,7 @@ def load_game(engine: "GameEngine", save_id: int) -> bool:
         InventoryItem(item_id=r.item_id, quantity=r.quantity, equipped_by=r.equipped_by)
         for r in item_rows
     ]
-    engine.inventory.gold = slot.avg_level  # 金币需要单独存储，此处暂用0
-
-    # 金币应从party计算
-    engine.inventory.gold = sum(m.gold for m in db_members)
+    engine.inventory.gold = slot.gold
 
     # 5) 任务
     quest_rows = QuestRepo.load_all(save_id)

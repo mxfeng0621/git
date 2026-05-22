@@ -81,9 +81,23 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+MIGRATIONS = [
+    # v0.4: 添加队伍金币列
+    "ALTER TABLE save_slots ADD COLUMN gold INTEGER DEFAULT 0",
+]
+
+
 def init_db() -> None:
-    """建表（首次启动调用）"""
+    """建表 + 迁移（首次启动调用）"""
     conn = get_connection()
     conn.executescript(SCHEMA)
+
+    # 执行增量迁移
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(save_slots)")}
+    for sql in MIGRATIONS:
+        col = sql.split("ADD COLUMN ")[1].split(" ")[0] if "ADD COLUMN" in sql else ""
+        if col and col not in existing:
+            conn.execute(sql)
+
     conn.commit()
     conn.close()

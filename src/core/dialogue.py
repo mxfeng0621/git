@@ -5,11 +5,11 @@ from dataclasses import dataclass, field
 
 @dataclass
 class DialogueOption:
-    text: str                              # 显示给玩家的选项文本
-    next_id: str = ""                      # 下一段对话id，空=结束
-    condition: str = ""                    # 条件表达式（如 "level>=5" / "has_item:ring"）
-    effects: dict = field(default_factory=dict)  # {"affinity": 10, "start_quest": "q001"}
-    one_shot: bool = False                 # 只能选一次
+    text: str
+    next_id: str = ""
+    condition: str = ""
+    effects: dict = field(default_factory=dict)
+    one_shot: bool = False
 
 
 @dataclass
