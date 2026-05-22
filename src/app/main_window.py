@@ -19,8 +19,14 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(960, 600)
         self.setStyleSheet(MAIN_STYLE)
 
+        # 引擎
+        from core.engine import GameEngine
+        self.engine = GameEngine()
+        self.engine.on_message = self._engine_message
+
         self._build_menu_bar()
         self._build_central()
+        self._build_status_bar()
         self._build_status_bar()
 
     # ---------- 菜单栏 ----------
@@ -177,21 +183,27 @@ class MainWindow(QMainWindow):
         self.status_bar = self.statusBar()
         self.status_bar.showMessage("就绪")
 
-    # ---------- 槽函数（占位） ----------
+    # ---------- 槽函数 ----------
     def _on_new_game(self) -> None:
-        self.log_panel.append("[系统] 新游戏 — 待实现")
+        result = self.engine.new_game()
+        self.log_panel.append(f"[系统] {result.text}")
 
     def _on_save(self) -> None:
-        self.log_panel.append("[系统] 存档 — 待实现")
+        result = self.engine.save_game(1)
+        self.log_panel.append(f"[系统] {result.text}")
 
     def _on_load(self) -> None:
-        self.log_panel.append("[系统] 读档 — 待实现")
+        result = self.engine.load_game(1)
+        self.log_panel.append(f"[系统] {result.text}")
 
     def _on_about(self) -> None:
         QMessageBox.about(self, "关于龙焰传说",
-                          "龙焰传说 v0.1\n\n"
+                          "龙焰传说 v0.3\n\n"
                           "基于 D&D 规则的文字冒险游戏。\n"
                           "PySide6 + SQLite 构建。")
+
+    def _engine_message(self, text: str, category) -> None:
+        self.log_panel.append(f"[{category.value}] {text}")
 
     def _on_command(self, inp: QLineEdit) -> None:
         text = inp.text().strip()
@@ -199,4 +211,13 @@ class MainWindow(QMainWindow):
             return
         self.log_panel.append(f"> {text}")
         inp.clear()
-        self.log_panel.append("[系统] 命令系统待实现")
+        cmd = self.engine.parser.parse(text)
+        result = self.engine.execute(cmd)
+        if result.text:
+            for line in result.text.split("\n"):
+                self.log_panel.append(line)
+        if result.combat_events:
+            for ev in result.combat_events:
+                line = ev.to_log_line()
+                if line.strip():
+                    self.log_panel.append(f"  {line}")

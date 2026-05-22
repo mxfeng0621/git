@@ -40,3 +40,4 @@ python src/main.py
 
 - [需求文档](docs/requirements.md) — 游戏功能与玩法设计
 - [开发文档](docs/development.md) — 技术架构与实现细节
+- [数据库设计](docs/database.md) — 表结构、关系与字段说明
