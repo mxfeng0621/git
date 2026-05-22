@@ -22,7 +22,8 @@ class Character:
     mp_current: int = 0
     mp_max: int = 0
     is_main: bool = False
-    slot_index: int = 0              # 队伍槽位 0-3
+    slot_index: int = 0
+    affinity: dict[str, int] = field(default_factory=dict)  # npc_id → 好感值(0-100)
 
     def __post_init__(self):
         if self.hp_max == 0:

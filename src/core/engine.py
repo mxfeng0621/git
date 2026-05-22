@@ -368,6 +368,12 @@ class GameEngine:
                             MessageCategory.WARNING)
 
     def _apply_dialogue_effects(self, effects: dict) -> None:
+        if "affinity" in effects and hasattr(self, '_pending_npc_id') and self._pending_npc_id:
+            for member in self.party.members:
+                if member:
+                    member.affinity[self._pending_npc_id] = \
+                        member.affinity.get(self._pending_npc_id, 0) + effects["affinity"]
+
         if "start_quest" in effects:
             qid = effects["start_quest"]
             self.quest_manager.start(qid)
@@ -559,7 +565,7 @@ class GameEngine:
                 lines.append(f"  · {d} → {name}")
         return ActionResult("\n".join(lines))
 
-    def new_game(self) -> ActionResult:
+    def new_game(self, main_char: Character | None = None) -> ActionResult:
         from core.character import create_character
         from data.quests import ALL_QUESTS
         from world.story import ALL_DIALOGUES
@@ -573,23 +579,25 @@ class GameEngine:
         self._pending_dialogue = None
         self._pending_npc_id = ""
 
-        # 初始化任务
         self.quest_manager = QuestManager()
         self.quest_manager.init_from_defs(ALL_QUESTS)
 
-        # 初始化对话
         self.dialogue_manager = DialogueManager()
         for npc_id, tree in ALL_DIALOGUES.items():
             self.dialogue_manager.register(tree)
 
-        # 创建默认主角
-        char = create_character("冒险者", "human", "warrior",
-                                {"str": 14, "dex": 12, "con": 13, "int": 10, "wis": 10, "cha": 12})
-        if isinstance(char, str):
-            return ActionResult(f"创建角色失败: {char}", MessageCategory.DANGER)
-        self.party.add_member(char, 0)
+        # 创建主角
+        if main_char is None:
+            main_char = create_character("冒险者", "human", "warrior",
+                                         {"str": 14, "dex": 12, "con": 13,
+                                          "int": 10, "wis": 10, "cha": 12})
+            if isinstance(main_char, str):
+                return ActionResult(f"创建角色失败: {main_char}", MessageCategory.DANGER)
+            main_char.is_main = True
 
-        # 初始场景文本
+        main_char.is_main = True
+        self.party.add_member(main_char, 0)
+
         scene = self.world_map.get("river_town")
         text = "新的冒险开始了！\n\n" + (scene.description if scene else "")
 

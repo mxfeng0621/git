@@ -1,174 +1,232 @@
-"""队伍面板 — 4人状态条 + 策略标签"""
+"""队伍面板 — 底部队员横排卡片（等宽填满+羊皮纸风格+AI预留头像）"""
 
 from PySide6.QtWidgets import (
-    QFrame, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QSizePolicy,
+    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QProgressBar, QSizePolicy,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPixmap, QPainter, QBrush, QColor, QFont, QMouseEvent
 
-from utils.constants import StrategyType
+from core.party import Party
+from core.character import Character
+
+# ---- 羊皮纸风格色板 ----
+PARCH_BG = "#2c1810"           # 深木色底
+PARCH_CARD = "#3e2216"         # 卡片底色
+PARCH_BORDER = "#8b6914"       # 古铜边框
+PARCH_GOLD = "#c9a96e"         # 金色文字
+PARCH_TEXT = "#e8d5b0"         # 奶油色正文
+PARCH_ACCENT = "#a0522d"       # 赤陶色强调
+
+CLASS_COLORS = {
+    "warrior": "#c0392b", "mage": "#8e44ad", "rogue": "#27ae60",
+    "cleric": "#d4ac0d", "ranger": "#2e86c1",
+}
+CLASS_SYMBOLS = {"warrior": "⚔️", "mage": "🔮", "rogue": "🗡️", "cleric": "✨", "ranger": "🏹"}
+RACE_SYMBOLS = {"human": "🧑", "elf": "🧝", "dwarf": "🧔", "halfling": "👤"}
 
 
-class MemberSlot(QFrame):
-    """单个队员槽位"""
+class PortraitWidget(QLabel):
+    """圆形头像 — emoji + 职业色边框"""
 
-    def __init__(self, index: int, parent=None):
+    def __init__(self, size: int = 56, parent=None):
         super().__init__(parent)
-        self.index = index
-        self.setFrameStyle(QFrame.Box)
-        self.setMinimumHeight(90)
-        self.setStyleSheet("MemberSlot { background: #16213e; border: 1px solid #4a3f35; "
-                           "border-radius: 4px; padding: 4px; }")
+        self._size = size
+        self.setFixedSize(size, size)
+        self._icon = ""
+        self._color = PARCH_BORDER
+        self._draw()
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(2)
+    def set_placeholder(self, race_id: str, class_id: str) -> None:
+        self._icon = RACE_SYMBOLS.get(race_id, "🧑")
+        self._color = CLASS_COLORS.get(class_id, PARCH_BORDER)
+        self._draw()
+
+    def _draw(self) -> None:
+        pix = QPixmap(self._size, self._size)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        # 外圈职业色
+        p.setBrush(QBrush(QColor(PARCH_CARD)))
+        p.setPen(QColor(self._color))
+        p.drawEllipse(2, 2, self._size - 4, self._size - 4)
+
+        # 内圈装饰
+        p.setPen(QColor(PARCH_BORDER))
+        p.drawEllipse(6, 6, self._size - 12, self._size - 12)
+
+        # emoji
+        if self._icon:
+            p.setFont(QFont("Segoe UI Emoji", self._size // 3 + 2))
+            p.setPen(QColor(PARCH_TEXT))
+            p.drawText(0, 0, self._size, self._size, Qt.AlignCenter, self._icon)
+
+        p.end()
+        self.setPixmap(pix)
+
+
+class MemberCard(QWidget):
+    """单队员卡片 — 羊皮纸风格"""
+    clicked = Signal(int)
+
+    def __init__(self, index: int = 0, parent=None):
+        super().__init__(parent)
+        self._index = index
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(160)
+        self.setMaximumHeight(175)
+        self.setCursor(Qt.PointingHandCursor)
+
+        self.setStyleSheet(f"""
+            MemberCard {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {PARCH_CARD}, stop:1 #2a180e);
+                border: 1px solid {PARCH_BORDER};
+                border-radius: 8px;
+                margin: 2px 4px;
+            }}
+            MemberCard:hover {{
+                border: 2px solid {PARCH_GOLD};
+                margin: 1px 3px;
+            }}
+        """)
+
+        main = QHBoxLayout(self)
+        main.setContentsMargins(12, 10, 14, 10)
+        main.setSpacing(12)
+
+        # === 左: 头像 ===
+        self.portrait = PortraitWidget(56)
+        main.addWidget(self.portrait)
+
+        # === 中: 信息 ===
+        center = QVBoxLayout()
+        center.setSpacing(2)
 
         # 名字 + 等级
-        top = QHBoxLayout()
-        self.name_label = QLabel(f"队员 {index + 1}")
-        self.name_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #d4c5a9;")
-        top.addWidget(self.name_label)
-
-        self.level_label = QLabel("Lv.1")
-        self.level_label.setStyleSheet("font-size: 11px; color: #8b7d6b;")
-        self.level_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        top.addWidget(self.level_label)
-        layout.addLayout(top)
+        top_row = QHBoxLayout()
+        self.name_lbl = QLabel("(空)")
+        self.name_lbl.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {PARCH_TEXT};")
+        top_row.addWidget(self.name_lbl)
+        top_row.addStretch()
+        self.level_lbl = QLabel("")
+        self.level_lbl.setStyleSheet(f"font-size: 12px; color: {PARCH_GOLD}; font-weight: bold;")
+        top_row.addWidget(self.level_lbl)
+        center.addLayout(top_row)
 
         # 种族职业
-        self.class_label = QLabel("—")
-        self.class_label.setStyleSheet("font-size: 11px; color: #8b7d6b;")
-        layout.addWidget(self.class_label)
+        self.class_lbl = QLabel("")
+        self.class_lbl.setStyleSheet(f"font-size: 11px; color: #9a8468;")
+        center.addWidget(self.class_lbl)
+
+        center.addSpacing(4)
 
         # HP条
-        hp_row = QHBoxLayout()
-        hp_row.addWidget(QLabel("HP", styleSheet="font-size:10px; color:#c0392b;"))
         self.hp_bar = QProgressBar()
-        self.hp_bar.setObjectName("hp_bar")
-        self.hp_bar.setRange(0, 100)
-        self.hp_bar.setValue(100)
+        self.hp_bar.setFixedHeight(14)
         self.hp_bar.setTextVisible(True)
-        self.hp_bar.setFormat("%v/%m")
-        self.hp_bar.setFixedHeight(16)
-        self.hp_bar.setStyleSheet(
-            "QProgressBar#hp_bar { border: 1px solid #4a3f35; border-radius: 2px; "
-            "background: #0f0f23; font-size: 9px; color: #d4c5a9; } "
-            "QProgressBar#hp_bar::chunk { background: #c0392b; border-radius: 1px; }"
-        )
-        hp_row.addWidget(self.hp_bar)
-        layout.addLayout(hp_row)
+        self.hp_bar.setFormat("HP %v/%m")
+        self.hp_bar.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid {PARCH_BORDER}; border-radius: 3px;
+                background: #1a0f08; font-size: 10px; color: {PARCH_TEXT};
+            }}
+            QProgressBar::chunk {{ background: #8b0000; border-radius: 2px; }}
+        """)
+        center.addWidget(self.hp_bar)
 
         # MP条
-        mp_row = QHBoxLayout()
-        mp_row.addWidget(QLabel("MP", styleSheet="font-size:10px; color:#2980b9;"))
         self.mp_bar = QProgressBar()
-        self.mp_bar.setObjectName("mp_bar")
-        self.mp_bar.setRange(0, 100)
-        self.mp_bar.setValue(100)
+        self.mp_bar.setFixedHeight(12)
         self.mp_bar.setTextVisible(True)
-        self.mp_bar.setFormat("%v/%m")
-        self.mp_bar.setFixedHeight(14)
-        self.mp_bar.setStyleSheet(
-            "QProgressBar#mp_bar { border: 1px solid #4a3f35; border-radius: 2px; "
-            "background: #0f0f23; font-size: 9px; color: #d4c5a9; } "
-            "QProgressBar#mp_bar::chunk { background: #2980b9; border-radius: 1px; }"
-        )
-        mp_row.addWidget(self.mp_bar)
-        layout.addLayout(mp_row)
+        self.mp_bar.setFormat("MP %v/%m")
+        self.mp_bar.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid {PARCH_BORDER}; border-radius: 3px;
+                background: #1a0f08; font-size: 10px; color: {PARCH_TEXT};
+            }}
+            QProgressBar::chunk {{ background: #1a5276; border-radius: 2px; }}
+        """)
+        center.addWidget(self.mp_bar)
 
         # 策略标签
-        self.strategy_label = QLabel("—")
-        self.strategy_label.setStyleSheet(
-            "font-size: 10px; color: #c9a96e; background: #0f0f23; "
-            "border-radius: 2px; padding: 1px 4px;"
-        )
-        self.strategy_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.strategy_label)
+        self.strat_lbl = QLabel("")
+        self.strat_lbl.setStyleSheet(f"font-size: 10px; color: {PARCH_GOLD};")
+        center.addWidget(self.strat_lbl)
 
-    def set_character(self, name: str, level: int, race_name: str, class_name: str,
-                      hp_cur: int, hp_max: int, mp_cur: int, mp_max: int,
-                      strategy: str = "") -> None:
-        self.name_label.setText(name)
-        self.level_label.setText(f"Lv.{level}")
-        self.class_label.setText(f"{race_name} · {class_name}")
-        self.hp_bar.setRange(0, hp_max)
-        self.hp_bar.setValue(hp_cur)
-        self.hp_bar.setFormat(f"{hp_cur}/{hp_max}")
-        self.mp_bar.setRange(0, mp_max)
-        self.mp_bar.setValue(mp_cur)
-        self.mp_bar.setFormat(f"{mp_cur}/{mp_max}")
-        if strategy:
-            self.strategy_label.setText(strategy)
-        self.setVisible(True)
+        main.addLayout(center, stretch=1)
 
-    def set_empty(self) -> None:
-        self.name_label.setText(f"队员 {self.index + 1}")
-        self.level_label.setText("—")
-        self.class_label.setText("（空）")
-        self.hp_bar.setRange(0, 1)
-        self.hp_bar.setValue(0)
-        self.hp_bar.setFormat("—/—")
-        self.mp_bar.setRange(0, 1)
-        self.mp_bar.setValue(0)
-        self.mp_bar.setFormat("—/—")
-        self.strategy_label.setText("—")
+        # === 右: 职业图标 ===
+        self.class_icon = QLabel("")
+        self.class_icon.setFixedWidth(36)
+        self.class_icon.setStyleSheet(f"font-size: 28px; color: {PARCH_GOLD};")
+        self.class_icon.setAlignment(Qt.AlignCenter)
+        main.addWidget(self.class_icon)
 
-    def update_hp_mp(self, hp_cur: int, hp_max: int, mp_cur: int, mp_max: int) -> None:
-        self.hp_bar.setRange(0, hp_max)
-        self.hp_bar.setValue(hp_cur)
-        self.hp_bar.setFormat(f"{hp_cur}/{hp_max}")
-        self.mp_bar.setRange(0, mp_max)
-        self.mp_bar.setValue(mp_cur)
-        self.mp_bar.setFormat(f"{mp_cur}/{mp_max}")
+    def set_member(self, char: Character | None, strategy: str = "") -> None:
+        if char is None:
+            self.name_lbl.setText("(空位)")
+            self.level_lbl.setText("")
+            self.class_lbl.setText("招募同伴加入")
+            self.class_icon.setText("❓")
+            self.hp_bar.setVisible(False)
+            self.mp_bar.setVisible(False)
+            self.strat_lbl.setText("")
+            self.portrait._icon = ""
+            self.portrait._draw()
+            self.setStyleSheet(self.styleSheet().replace(
+                f"border: 2px solid {PARCH_GOLD}", ""))
+            return
 
-    def set_strategy(self, strategy: str) -> None:
-        self.strategy_label.setText(strategy)
+        self.name_lbl.setText(char.name)
+        self.level_lbl.setText(f"Lv.{char.level}")
+        self.class_lbl.setText(f"{char.race_name} · {char.class_name}")
+        self.class_icon.setText(CLASS_SYMBOLS.get(char.class_id, "⚔️"))
+
+        self.hp_bar.setVisible(True)
+        self.hp_bar.setRange(0, char.hp_max)
+        self.hp_bar.setValue(char.hp_current)
+        self.hp_bar.setFormat(f"HP {char.hp_current}/{char.hp_max}")
+
+        # HP颜色: 绿/黄/红
+        pct = char.hp_current / max(char.hp_max, 1)
+        hp_color = "#27ae60" if pct > 0.6 else ("#d4ac0d" if pct > 0.3 else "#8b0000")
+        self.hp_bar.setStyleSheet(self.hp_bar.styleSheet().split(
+            "QProgressBar::chunk")[0] +
+            f"QProgressBar::chunk {{ background: {hp_color}; border-radius: 2px; }}")
+
+        self.mp_bar.setVisible(True)
+        self.mp_bar.setRange(0, char.mp_max)
+        self.mp_bar.setValue(char.mp_current)
+        self.mp_bar.setFormat(f"MP {char.mp_current}/{char.mp_max}")
+
+        self.strat_lbl.setText(f"🎯 {strategy}" if strategy else "")
+        self.portrait.set_placeholder(char.race_id, char.class_id)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        self.clicked.emit(self._index)
+        super().mousePressEvent(event)
 
 
-class PartyPanel(QFrame):
-    """队伍面板容器"""
+class PartyPanel(QWidget):
+    """底部队员横排 — 等宽填满"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("party_panel")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        self.setMinimumHeight(175)
+        self.setMaximumHeight(190)
+        self.setStyleSheet("PartyPanel { background: transparent; }")
 
-        title = QLabel("冒险小队")
-        title.setObjectName("title")
-        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #c9a96e;")
-        layout.addWidget(title)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(2, 0, 2, 2)
+        layout.setSpacing(0)
+        self.cards = [MemberCard(i) for i in range(4)]
+        for c in self.cards:
+            layout.addWidget(c, stretch=1)
 
-        self.slots: list[MemberSlot] = []
-        for i in range(4):
-            slot = MemberSlot(i)
-            slot.set_empty()
-            self.slots.append(slot)
-            layout.addWidget(slot)
-
-        layout.addStretch()
-
-    def refresh(self, party, combat=None) -> None:
-        """从 Party 对象刷新所有槽位"""
-        from core.party import Party
-        for i, slot in enumerate(self.slots):
-            member = party.members[i] if i < len(party.members) else None
-            if member:
-                strategy = ""
-                if combat:
-                    strat = combat.get_strategy(i)
-                    strategy = strat.value
-                slot.set_character(
-                    name=member.name,
-                    level=member.level,
-                    race_name=member.race_name,
-                    class_name=member.class_name,
-                    hp_cur=member.hp_current,
-                    hp_max=member.hp_max,
-                    mp_cur=member.mp_current,
-                    mp_max=member.mp_max,
-                    strategy=strategy,
-                )
-            else:
-                slot.set_empty()
+    def refresh(self, party: Party, combat=None) -> None:
+        for i, card in enumerate(self.cards):
+            char = party.get(i)
+            strat = combat.get_strategy(i).value if combat and char else ""
+            card.set_member(char, strat)

@@ -11,9 +11,11 @@ class Scene:
     connections: dict[str, str] = field(default_factory=dict)  # 方向→scene_id
     events: dict[str, dict] = field(default_factory=dict)        # 触发条件→事件
     npcs: list[str] = field(default_factory=list)                # 场景中的NPC id列表
-    monster_spawns: list[dict] = field(default_factory=list)     # 随机遇敌 [{enemy_ids, chance%}]
-    is_safe: bool = True                                          # 安全区不会遇敌
-    image_hint: str = ""                                          # 插图提示词
+    monster_spawns: list[dict] = field(default_factory=list)
+    is_safe: bool = True
+    image_hint: str = ""
+    interactables: list[dict] = field(default_factory=list)
+    # [{label: "推开石门", action: "push", target: "stone_door", icon: "🪨"}]
 
 
 SCENES: dict[str, Scene] = {
@@ -45,6 +47,11 @@ SCENES: dict[str, Scene] = {
         npcs=["mayor_river", "guard_captain"],
         is_safe=True,
         image_hint="a peaceful medieval town by a river, cobblestone streets, wooden houses, fountain in center square, fantasy art style",
+        interactables=[
+            {"label": "搜索喷泉", "action": "explore", "icon": "🔍"},
+            {"label": "查看布告板", "action": "look", "target": "布告板", "icon": "📋"},
+            {"label": "休息", "action": "rest", "icon": "🛌"},
+        ],
     ),
 
     "river_inn": Scene(
@@ -138,6 +145,10 @@ SCENES: dict[str, Scene] = {
         ],
         is_safe=False,
         image_hint="dark dense forest, barely any sunlight through canopy, moss-covered trees, broken wagon on path, eerie atmosphere, fantasy art",
+        interactables=[
+            {"label": "搜索残骸", "action": "explore", "icon": "🔍"},
+            {"label": "检查破旧马车", "action": "look", "target": "破旧马车", "icon": "👀"},
+        ],
     ),
 
     "forest_deep": Scene(

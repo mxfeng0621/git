@@ -113,7 +113,12 @@ def save_game(engine: "GameEngine", slot: int = 1,
         })
     QuestRepo.save_all(save_id, quest_data)
 
-    # 6) 进度
+    # 6) 进度（含好感度）
+    all_affinity = {}
+    for i, m in enumerate(party.members):
+        if m and m.affinity:
+            all_affinity[str(i)] = m.affinity
+    engine.story_flags["_affinity"] = all_affinity
     ProgressRepo.save(
         save_id, engine.current_scene_id,
         engine.story_flags,
@@ -143,6 +148,7 @@ def load_game(engine: "GameEngine", save_id: int) -> bool:
     engine.current_scene_id = progress.scene_id
     engine.story_flags = json.loads(progress.flags) if progress.flags else {}
     engine.defeated_bosses = set(json.loads(progress.defeated) if progress.defeated else [])
+    all_affinity = engine.story_flags.pop("_affinity", {})
 
     # 2) 队员
     db_members = PartyMemberRepo.load_all(save_id)
@@ -163,6 +169,7 @@ def load_game(engine: "GameEngine", save_id: int) -> bool:
             is_main=dbm.is_main,
         )
         char.slot_index = dbm.slot_index
+        char.affinity = all_affinity.get(str(dbm.slot_index), {})
         engine.party.members[dbm.slot_index] = char
         member_id_to_slot[dbm.id] = dbm.slot_index
 

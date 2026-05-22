@@ -52,7 +52,8 @@ class WorldMap:
             if random.random() * 100 < spawn["chance"]:
                 count = random.randint(spawn.get("min_count", 1),
                                       spawn.get("max_count", 1))
-                return spawn["enemy_ids"] * (count // len(spawn["enemy_ids"]) + 1)[:count]
+                repeated = spawn["enemy_ids"] * (count // len(spawn["enemy_ids"]) + 1)
+                return repeated[:count]
 
         return None
 
